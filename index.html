@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HANDWAVE — Gesture Controller</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;600;700&family=Exo+2:ital,wght@0,100;0,400;0,700;1,400&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #04040c;
+  --panel:    #07071a;
+  --surface:  #0a0a20;
+  --border:   #141430;
+  --border2:  #1e1e45;
+
+  --neon-c:   #00ffe5;   /* cyan */
+  --neon-m:   #ff00cc;   /* magenta */
+  --neon-y:   #ffe600;   /* yellow */
+  --neon-g:   #39ff14;   /* green */
+  --neon-o:   #ff6200;   /* orange */
+
+  --text:     #ccd6f6;
+  --muted:    #3a3a70;
+  --dim:      #12122a;
+
+  --hand-color: var(--neon-c);
+}
+
+html, body { height: 100%; overflow: hidden; background: var(--bg); }
+
+body {
+  font-family: 'Rajdhani', sans-serif;
+  color: var(--text);
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  height: 100vh;
+}
+
+/* ── Animated grid bg ────────────────────────────────────────── */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image:
+    linear-gradient(rgba(0,255,229,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,255,229,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+  animation: grid-drift 20s linear infinite;
+}
+@keyframes grid-drift {
+  from { background-position: 0 0; }
+  to   { background-position: 40px 40px; }
+}
+
+/* ── Scanlines ───────────────────────────────────────────────── */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 3px,
+    rgba(0,0,0,0.12) 3px, rgba(0,0,0,0.12) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── HEADER ──────────────────────────────────────────────────── */
+header {
+  position: relative;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.5rem;
+  background: rgba(7,7,26,0.95);
+  border-bottom: 1px solid var(--border2);
+  backdrop-filter: blur(10px);
+}
+
+.logo {
+  font-family: 'Exo 2', sans-serif;
+  font-weight: 700;
+  font-size: 1.4rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--neon-c);
+  text-shadow: 0 0 20px var(--neon-c), 0 0 40px rgba(0,255,229,0.3);
+}
+.logo em { color: var(--neon-m); font-style: normal; text-shadow: 0 0 20px var(--neon-m); }
+
+.header-chips { display: flex; align-items: center; gap: 10px; }
+
+.chip {
+  font-size: 0.62rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  border: 1px solid var(--border2);
+  border-radius: 2px;
+  color: var(--muted);
+  display: flex; align-items: center; gap: 6px;
+  transition: all 0.3s;
+}
+.chip .pip { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); transition: all 0.3s; }
+.chip.on { color: var(--neon-c); border-color: var(--neon-c); }
+.chip.on .pip { background: var(--neon-c); box-shadow: 0 0 8px var(--neon-c); animation: pip-blink 1.2s ease-in-out infinite; }
+.chip.gesture-active { color: var(--neon-m); border-color: var(--neon-m); }
+.chip.gesture-active .pip { background: var(--neon-m); box-shadow: 0 0 8px var(--neon-m); }
+@keyframes pip-blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+/* ── BODY ────────────────────────────────────────────────────── */
+.app {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  overflow: hidden;
+}
+
+/* ── LEFT: SPLIT CAMERA / CANVAS ────────────────────────────── */
+.left-section {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  border-right: 1px solid var(--border2);
+  overflow: hidden;
+}
+
+/* Camera pane */
+.cam-pane {
+  position: relative;
+  background: #000;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border2);
+}
+
+.cam-label {
+  position: absolute;
+  top: 10px; left: 12px;
+  font-size: 0.52rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(0,255,229,0.4);
+  z-index: 5;
+}
+
+video { display: none; }
+
+canvas#cam-feed {
+  width: 100%; height: 100%;
+  display: block;
+  object-fit: cover;
+  transform: scaleX(-1);
+  filter: brightness(0.8) contrast(1.1) saturate(0.5);
+}
+
+canvas#hand-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  transform: scaleX(-1);
+}
+
+/* Canvas pane (drawing / game) */
+.canvas-pane {
+  position: relative;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.canvas-label {
+  position: absolute;
+  top: 10px; left: 12px;
+  font-size: 0.52rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(255,0,204,0.4);
+  z-index: 5;
+}
+
+canvas#draw-canvas {
+  width: 100%; height: 100%;
+  display: block;
+  cursor: none;
+}
+
+/* Cursor dot */
+#cursor-dot {
+  position: absolute;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--neon-m);
+  box-shadow: 0 0 12px var(--neon-m);
+  pointer-events: none;
+  z-index: 10;
+  transform: translate(-50%, -50%);
+  transition: width 0.1s, height 0.1s, border-color 0.2s, box-shadow 0.2s;
+  left: -100px; top: -100px;
+}
+#cursor-dot.pinch {
+  width: 24px; height: 24px;
+  border-color: var(--neon-y);
+  box-shadow: 0 0 20px var(--neon-y);
+}
+
+/* ── RIGHT PANEL ─────────────────────────────────────────────── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.panel::-webkit-scrollbar { width: 3px; }
+.panel::-webkit-scrollbar-thumb { background: var(--border2); }
+
+.p-section {
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.p-title {
+  font-size: 0.52rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.85rem;
+  display: flex; align-items: center; gap: 8px;
+}
+.p-title::after { content: ''; flex: 1; height: 1px; background: var(--border2); }
+
+/* Gesture cards */
+.gesture-grid { display: flex; flex-direction: column; gap: 5px; }
+
+.gesture-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  background: var(--dim);
+  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.gesture-card.active {
+  border-color: var(--neon-m);
+  background: rgba(255,0,204,0.06);
+}
+.gesture-card.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--neon-m);
+  box-shadow: 0 0 8px var(--neon-m);
+}
+
+.g-emoji { font-size: 1.3rem; line-height: 1; flex-shrink: 0; }
+
+.g-info { flex: 1; min-width: 0; }
+.g-name { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; color: var(--text); }
+.g-desc { font-size: 0.52rem; letter-spacing: 0.04em; color: var(--muted); margin-top: 1px; }
+
+.g-key {
+  font-size: 0.48rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border: 1px solid var(--border2);
+  border-radius: 2px;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color 0.2s, border-color 0.2s;
+}
+.gesture-card.active .g-key { color: var(--neon-m); border-color: var(--neon-m); }
+
+/* Finger status */
+.finger-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 5px;
+  margin-bottom: 0.5rem;
+}
+
+.finger-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.finger-icon {
+  font-size: 1.3rem;
+  line-height: 1;
+  filter: grayscale(1);
+  transition: filter 0.2s;
+}
+.finger-icon.up { filter: none; }
+
+.finger-label {
+  font-size: 0.42rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Draw controls */
+.color-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 0.6rem; }
+.color-swatch {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: transform 0.15s, border-color 0.15s;
+}
+.color-swatch:hover { transform: scale(1.2); }
+.color-swatch.active { border-color: white; transform: scale(1.15); }
+
+.size-row { display: flex; align-items: center; gap: 8px; }
+.size-label { font-size: 0.52rem; letter-spacing: 0.1em; color: var(--muted); }
+input[type=range] {
+  flex: 1;
+  -webkit-appearance: none;
+  height: 2px;
+  background: var(--border2);
+  outline: none;
+  border-radius: 1px;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  background: var(--neon-c);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 6px var(--neon-c);
+}
+.size-val { font-size: 0.52rem; color: var(--neon-c); width: 20px; }
+
+.action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 0.6rem; }
+.act-btn {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--muted);
+  padding: 7px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.act-btn:hover { border-color: var(--neon-c); color: var(--neon-c); background: rgba(0,255,229,0.05); }
+.act-btn.danger:hover { border-color: var(--neon-m); color: var(--neon-m); background: rgba(255,0,204,0.05); }
+
+/* Hand confidence bar */
+.conf-bar {
+  height: 4px;
+  background: var(--dim);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 0.5rem;
+}
+.conf-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--neon-c), var(--neon-m));
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.2s;
+  box-shadow: 0 0 6px var(--neon-c);
+}
+
+/* Stats */
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.stat-box {
+  background: var(--dim);
+  border: 1px solid var(--border2);
+  border-radius: 2px;
+  padding: 8px 10px;
+}
+.stat-lbl { font-size: 0.44rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted); }
+.stat-val { font-size: 0.9rem; font-weight: 700; letter-spacing: 0.05em; color: var(--neon-c); margin-top: 2px; }
+
+/* Loading overlay */
+#loading {
+  position: fixed; inset: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  z-index: 9998;
+  transition: opacity 0.7s;
+}
+#loading.gone { opacity: 0; pointer-events: none; }
+
+.load-logo {
+  font-family: 'Exo 2', sans-serif;
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: 0.35em;
+  color: var(--neon-c);
+  text-shadow: 0 0 40px var(--neon-c);
+  animation: logo-pulse 2s ease-in-out infinite;
+}
+.load-logo em { color: var(--neon-m); font-style: normal; }
+@keyframes logo-pulse { 0%,100%{opacity:1;text-shadow:0 0 40px var(--neon-c)} 50%{opacity:0.7;text-shadow:0 0 80px var(--neon-c)} }
+
+.load-msg {
+  font-size: 0.62rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.load-bar { width: 260px; height: 1px; background: var(--border2); overflow: hidden; }
+.load-fill-anim { height: 100%; background: linear-gradient(90deg, var(--neon-c), var(--neon-m)); width: 0%; animation: fill-anim 2.5s ease forwards; box-shadow: 0 0 8px var(--neon-c); }
+@keyframes fill-anim { to { width: 100%; } }
+
+/* Gesture flash overlay */
+.gesture-flash {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.gesture-flash.show { opacity: 1; }
+.gesture-flash-text {
+  font-family: 'Exo 2', sans-serif;
+  font-size: clamp(1rem, 4vw, 2rem);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--neon-m);
+  text-shadow: 0 0 30px var(--neon-m);
+  background: rgba(4,4,12,0.7);
+  padding: 0.5rem 1.5rem;
+  border: 1px solid var(--neon-m);
+  border-radius: 3px;
+}
+
+/* Mode badge */
+.mode-badge {
+  position: absolute;
+  bottom: 10px; right: 12px;
+  font-size: 0.48rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--neon-m);
+  border: 1px solid rgba(255,0,204,0.3);
+  padding: 3px 8px;
+  border-radius: 2px;
+  z-index: 5;
+  transition: all 0.3s;
+}
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="load-logo">HAND<em>WAVE</em></div>
+  <div class="load-msg" id="load-msg">Loading MediaPipe…</div>
+  <div class="load-bar"><div class="load-fill-anim"></div></div>
+</div>
+
+<header>
+  <div class="logo">HAND<em>WAVE</em></div>
+  <div class="header-chips">
+    <div class="chip" id="chip-cam"><div class="pip"></div><span>Camera</span></div>
+    <div class="chip" id="chip-hand"><div class="pip"></div><span id="chip-hand-text">No Hand</span></div>
+    <div class="chip" id="chip-gesture"><div class="pip"></div><span id="chip-gest-text">–––</span></div>
+    <div class="chip" id="chip-mode" style="color:var(--neon-y);border-color:rgba(255,230,0,0.3)"><div class="pip" style="background:var(--neon-y)"></div><span id="chip-mode-text">DRAW</span></div>
+  </div>
+</header>
+
+<div class="app">
+
+  <!-- LEFT -->
+  <div class="left-section">
+
+    <!-- Camera pane -->
+    <div class="cam-pane">
+      <div class="cam-label">CAM · HAND TRACKING</div>
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="cam-feed"></canvas>
+      <canvas id="hand-overlay"></canvas>
+    </div>
+
+    <!-- Drawing canvas pane -->
+    <div class="canvas-pane" id="canvas-pane">
+      <div class="canvas-label" id="canvas-label">DRAW MODE · PINCH TO DRAW</div>
+      <canvas id="draw-canvas"></canvas>
+      <div id="cursor-dot"></div>
+      <div class="gesture-flash" id="gest-flash">
+        <div class="gesture-flash-text" id="gest-flash-text"></div>
+      </div>
+      <div class="mode-badge" id="mode-badge">DRAW</div>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div class="panel">
+
+    <!-- Gesture guide -->
+    <div class="p-section">
+      <div class="p-title">Gesture Commands</div>
+      <div class="gesture-grid" id="gesture-grid">
+        <div class="gesture-card" id="g-draw">
+          <div class="g-emoji">🤏</div>
+          <div class="g-info"><div class="g-name">Pinch</div><div class="g-desc">Draw on canvas</div></div>
+          <div class="g-key">DRAW</div>
+        </div>
+        <div class="gesture-card" id="g-point">
+          <div class="g-emoji">☝️</div>
+          <div class="g-info"><div class="g-name">Point</div><div class="g-desc">Move cursor only</div></div>
+          <div class="g-key">HOVER</div>
+        </div>
+        <div class="gesture-card" id="g-open">
+          <div class="g-emoji">✋</div>
+          <div class="g-info"><div class="g-name">Open Hand</div><div class="g-desc">Erase mode</div></div>
+          <div class="g-key">ERASE</div>
+        </div>
+        <div class="gesture-card" id="g-peace">
+          <div class="g-emoji">✌️</div>
+          <div class="g-info"><div class="g-name">Peace / V</div><div class="g-desc">Change color</div></div>
+          <div class="g-key">COLOR</div>
+        </div>
+        <div class="gesture-card" id="g-fist">
+          <div class="g-emoji">✊</div>
+          <div class="g-info"><div class="g-name">Fist</div><div class="g-desc">Clear canvas</div></div>
+          <div class="g-key">CLEAR</div>
+        </div>
+        <div class="gesture-card" id="g-ok">
+          <div class="g-emoji">👍</div>
+          <div class="g-info"><div class="g-name">Thumbs Up</div><div class="g-desc">Save image</div></div>
+          <div class="g-key">SAVE</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Finger state -->
+    <div class="p-section">
+      <div class="p-title">Finger State</div>
+      <div class="finger-row" id="finger-row">
+        <div class="finger-cell"><div class="finger-icon" id="fi-0">👍</div><div class="finger-label">Thumb</div></div>
+        <div class="finger-cell"><div class="finger-icon" id="fi-1">☝️</div><div class="finger-label">Index</div></div>
+        <div class="finger-cell"><div class="finger-icon" id="fi-2">🖕</div><div class="finger-label">Middle</div></div>
+        <div class="finger-cell"><div class="finger-icon" id="fi-3">💍</div><div class="finger-label">Ring</div></div>
+        <div class="finger-cell"><div class="finger-icon" id="fi-4">🤙</div><div class="finger-label">Pinky</div></div>
+      </div>
+      <div class="conf-bar"><div class="conf-fill" id="conf-fill"></div></div>
+    </div>
+
+    <!-- Draw controls -->
+    <div class="p-section">
+      <div class="p-title">Draw Controls</div>
+      <div class="color-row" id="color-row">
+        <div class="color-swatch active" data-color="#00ffe5" style="background:#00ffe5" title="Cyan"></div>
+        <div class="color-swatch" data-color="#ff00cc" style="background:#ff00cc" title="Magenta"></div>
+        <div class="color-swatch" data-color="#ffe600" style="background:#ffe600" title="Yellow"></div>
+        <div class="color-swatch" data-color="#39ff14" style="background:#39ff14" title="Green"></div>
+        <div class="color-swatch" data-color="#ff6200" style="background:#ff6200" title="Orange"></div>
+        <div class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="White"></div>
+        <div class="color-swatch" data-color="#ff2d55" style="background:#ff2d55" title="Red"></div>
+        <div class="color-swatch" data-color="#5e5ce6" style="background:#5e5ce6" title="Purple"></div>
+      </div>
+      <div class="size-row">
+        <div class="size-label">Brush</div>
+        <input type="range" id="brush-size" min="2" max="40" value="8">
+        <div class="size-val" id="brush-val">8</div>
+      </div>
+      <div class="size-row" style="margin-top:6px">
+        <div class="size-label">Opacity</div>
+        <input type="range" id="brush-opacity" min="10" max="100" value="90">
+        <div class="size-val" id="opacity-val">90</div>
+      </div>
+      <div class="action-row">
+        <button class="act-btn" id="btn-save">💾 Save</button>
+        <button class="act-btn danger" id="btn-clear">🗑 Clear</button>
+        <button class="act-btn" id="btn-undo">↩ Undo</button>
+        <button class="act-btn" id="btn-grid">⊞ Grid</button>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="p-section">
+      <div class="p-title">Session Stats</div>
+      <div class="stats-grid">
+        <div class="stat-box"><div class="stat-lbl">Gestures</div><div class="stat-val" id="st-gest">0</div></div>
+        <div class="stat-box"><div class="stat-lbl">Strokes</div><div class="stat-val" id="st-strokes">0</div></div>
+        <div class="stat-box"><div class="stat-lbl">Hand</div><div class="stat-val" id="st-hand">–</div></div>
+        <div class="stat-box"><div class="stat-lbl">FPS</div><div class="stat-val" id="st-fps">–</div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+const DRAW_COLORS = ['#00ffe5','#ff00cc','#ffe600','#39ff14','#ff6200','#ffffff','#ff2d55','#5e5ce6'];
+let colorIdx = 0;
+
+const draw = {
+  color: DRAW_COLORS[0],
+  size: 8,
+  opacity: 0.9,
+  mode: 'draw',  // draw | erase | hover
+  isDrawing: false,
+  lastX: null,
+  lastY: null,
+  strokes: 0,
+  undoStack: [],
+  showGrid: false,
+};
+
+const stats = { gestures: 0, fps: 0, fpsF: 0, fpsL: performance.now() };
+
+// ── Elements ──────────────────────────────────────────────────────────────────
+const video     = document.getElementById('video');
+const camFeed   = document.getElementById('cam-feed');
+const handOvl   = document.getElementById('hand-overlay');
+const drawCvs   = document.getElementById('draw-canvas');
+const cCtx      = camFeed.getContext('2d');
+const hCtx      = handOvl.getContext('2d');
+const dCtx      = drawCvs.getContext('2d');
+const cursorDot = document.getElementById('cursor-dot');
+const gestFlash = document.getElementById('gest-flash');
+const gestFlashTxt = document.getElementById('gest-flash-text');
+let canvasPane  = document.getElementById('canvas-pane');
+
+// ── Resize canvases ───────────────────────────────────────────────────────────
+function resizeAll() {
+  const cp = canvasPane.getBoundingClientRect();
+  drawCvs.width  = cp.width;
+  drawCvs.height = cp.height;
+  redrawGrid();
+}
+
+window.addEventListener('resize', resizeAll);
+
+// ── MediaPipe Hands ───────────────────────────────────────────────────────────
+const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.6 });
+hands.onResults(onHandResults);
+
+// ── Camera setup ──────────────────────────────────────────────────────────────
+async function startCamera() {
+  document.getElementById('load-msg').textContent = 'Starting camera…';
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadedmetadata = r);
+  video.play();
+
+  camFeed.width = handOvl.width = video.videoWidth;
+  camFeed.height = handOvl.height = video.videoHeight;
+
+  resizeAll();
+
+  const mpCam = new Camera(video, {
+    onFrame: async () => {
+      // FPS
+      stats.fpsF++;
+      const now = performance.now();
+      if (now - stats.fpsL >= 1000) {
+        stats.fps = stats.fpsF; stats.fpsF = 0; stats.fpsL = now;
+        document.getElementById('st-fps').textContent = stats.fps;
+      }
+      await hands.send({ image: video });
+    },
+    width: video.videoWidth, height: video.videoHeight
+  });
+  mpCam.start();
+
+  document.getElementById('loading').classList.add('gone');
+  document.getElementById('chip-cam').classList.add('on');
+}
+
+// ── Hand results ──────────────────────────────────────────────────────────────
+let lastGesture = null;
+let gestCooldown = false;
+
+function onHandResults(results) {
+  // Draw mirrored cam feed
+  cCtx.save();
+  cCtx.translate(camFeed.width, 0);
+  cCtx.scale(-1, 1);
+  cCtx.drawImage(results.image, 0, 0, camFeed.width, camFeed.height);
+  cCtx.restore();
+
+  hCtx.clearRect(0, 0, handOvl.width, handOvl.height);
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    // No hand
+    document.getElementById('chip-hand').classList.remove('on');
+    document.getElementById('chip-hand-text').textContent = 'No Hand';
+    document.getElementById('chip-gesture').classList.remove('gesture-active');
+    document.getElementById('chip-gest-text').textContent = '–––';
+    document.getElementById('conf-fill').style.width = '0%';
+    document.getElementById('st-hand').textContent = '–';
+    cursorDot.style.left = '-100px';
+    draw.isDrawing = false; draw.lastX = null; draw.lastY = null;
+    // Reset finger indicators
+    for (let i = 0; i < 5; i++) document.getElementById(`fi-${i}`).classList.remove('up');
+    clearGestureCards();
+    return;
+  }
+
+  const lm = results.multiHandLandmarks[0];
+  const handedness = results.multiHandedness?.[0]?.label || '?';
+  const conf = results.multiHandedness?.[0]?.score || 0;
+
+  document.getElementById('chip-hand').classList.add('on');
+  document.getElementById('chip-hand-text').textContent = `${handedness} Hand`;
+  document.getElementById('conf-fill').style.width = `${Math.round(conf * 100)}%`;
+  document.getElementById('st-hand').textContent = handedness[0];
+
+  // Draw skeleton on overlay (already mirrored via CSS)
+  drawSkeleton(lm, conf);
+
+  // Finger states (are they extended?)
+  const fingers = getFingerState(lm);
+  updateFingerUI(fingers);
+
+  // Gesture recognition
+  const gesture = recognizeGesture(fingers, lm);
+  handleGesture(gesture, lm);
+}
+
+// ── Finger state ──────────────────────────────────────────────────────────────
+// Returns array of booleans [thumb, index, middle, ring, pinky]
+function getFingerState(lm) {
+  const tips   = [4, 8, 12, 16, 20];
+  const pips   = [3, 6, 10, 14, 18];
+  const mcps   = [2, 5, 9, 13, 17];
+
+  // Thumb: compare x (mirrored)
+  const thumbUp = lm[4].x < lm[3].x;
+
+  const others = [1,2,3,4].map(i =>
+    lm[tips[i]].y < lm[pips[i]].y
+  );
+  return [thumbUp, ...others];
+}
+
+// ── Gesture recognizer ────────────────────────────────────────────────────────
+function recognizeGesture(f, lm) {
+  const [thumb, index, middle, ring, pinky] = f;
+  const allOpen = thumb && index && middle && ring && pinky;
+  const fist    = !thumb && !index && !middle && !ring && !pinky;
+  const peace   = !thumb && index && middle && !ring && !pinky;
+  const point   = !thumb && index && !middle && !ring && !pinky;
+  const thumbUp = thumb && !index && !middle && !ring && !pinky;
+
+  // Pinch: thumb tip close to index tip
+  const dx = lm[4].x - lm[8].x;
+  const dy = lm[4].y - lm[8].y;
+  const pinchDist = Math.sqrt(dx*dx + dy*dy);
+  const pinch = pinchDist < 0.07 && !middle;
+
+  if (pinch)    return 'pinch';
+  if (fist)     return 'fist';
+  if (allOpen)  return 'open';
+  if (peace)    return 'peace';
+  if (thumbUp)  return 'thumbup';
+  if (point)    return 'point';
+  return 'none';
+}
+
+// ── Handle gestures ───────────────────────────────────────────────────────────
+function handleGesture(gesture, lm) {
+  // Cursor position from index finger tip (point 8), mirrored
+  const cx = (1 - lm[8].x) * drawCvs.width;
+  const cy = lm[8].y * drawCvs.height;
+
+  // Update cursor
+  cursorDot.style.left = `${cx}px`;
+  cursorDot.style.top  = `${cy}px`;
+  cursorDot.classList.toggle('pinch', gesture === 'pinch');
+
+  // Chip update
+  const gNames = { pinch:'PINCH', fist:'FIST', open:'OPEN', peace:'PEACE ✌', thumbup:'THUMBS UP', point:'POINT', none:'–' };
+  document.getElementById('chip-gest-text').textContent = gNames[gesture] || gesture.toUpperCase();
+  document.getElementById('chip-gesture').classList.toggle('gesture-active', gesture !== 'none');
+
+  // Update gesture cards
+  clearGestureCards();
+  const gMap = { pinch:'g-draw', point:'g-point', open:'g-open', peace:'g-peace', fist:'g-fist', thumbup:'g-ok' };
+  if (gMap[gesture]) document.getElementById(gMap[gesture])?.classList.add('active');
+
+  // Drawing logic
+  if (gesture === 'pinch') {
+    // Draw mode
+    cursorDot.classList.add('pinch');
+    if (!draw.isDrawing) {
+      // Save undo state
+      if (draw.undoStack.length > 20) draw.undoStack.shift();
+      draw.undoStack.push(dCtx.getImageData(0, 0, drawCvs.width, drawCvs.height));
+      draw.strokes++;
+      document.getElementById('st-strokes').textContent = draw.strokes;
+    }
+    draw.isDrawing = true;
+    if (draw.lastX !== null) {
+      dCtx.save();
+      dCtx.globalAlpha = draw.opacity;
+      dCtx.globalCompositeOperation = 'source-over';
+      dCtx.strokeStyle = draw.color;
+      dCtx.lineWidth = draw.size;
+      dCtx.lineCap = 'round';
+      dCtx.lineJoin = 'round';
+      dCtx.shadowColor = draw.color;
+      dCtx.shadowBlur = draw.size * 0.8;
+      dCtx.beginPath();
+      dCtx.moveTo(draw.lastX, draw.lastY);
+      dCtx.lineTo(cx, cy);
+      dCtx.stroke();
+      dCtx.restore();
+    }
+    draw.lastX = cx; draw.lastY = cy;
+
+  } else if (gesture === 'open') {
+    // Erase mode
+    draw.isDrawing = false; draw.lastX = null; draw.lastY = null;
+    dCtx.save();
+    dCtx.globalCompositeOperation = 'destination-out';
+    dCtx.beginPath();
+    dCtx.arc(cx, cy, draw.size * 3, 0, Math.PI * 2);
+    dCtx.fill();
+    dCtx.restore();
+    setMode('ERASE');
+
+  } else {
+    draw.isDrawing = false; draw.lastX = null; draw.lastY = null;
+
+    if (gesture === 'none' || gesture === 'point') {
+      setMode('HOVER');
+    }
+
+    // One-shot gestures (with cooldown)
+    if (!gestCooldown && gesture !== lastGesture) {
+      if (gesture === 'fist') {
+        triggerFlash('✊ CANVAS CLEARED');
+        clearCanvas();
+        bumpGestStat();
+      } else if (gesture === 'peace') {
+        colorIdx = (colorIdx + 1) % DRAW_COLORS.length;
+        draw.color = DRAW_COLORS[colorIdx];
+        updateColorSwatches();
+        triggerFlash('✌️ COLOR CHANGED');
+        bumpGestStat();
+      } else if (gesture === 'thumbup') {
+        saveCanvas();
+        triggerFlash('👍 SAVED!');
+        bumpGestStat();
+      }
+
+      if (['fist','peace','thumbup'].includes(gesture)) {
+        gestCooldown = true;
+        setTimeout(() => { gestCooldown = false; }, 1800);
+      }
+    }
+
+    if (gesture === 'pinch') setMode('DRAW');
+  }
+
+  lastGesture = gesture;
+}
+
+function setMode(m) {
+  document.getElementById('mode-badge').textContent = m;
+  document.getElementById('chip-mode-text').textContent = m;
+  document.getElementById('canvas-label').textContent =
+    m === 'DRAW' ? 'DRAW MODE · PINCH TO DRAW' :
+    m === 'ERASE' ? 'ERASE MODE · OPEN HAND' : 'HOVER MODE';
+}
+
+function bumpGestStat() {
+  stats.gestures++;
+  document.getElementById('st-gest').textContent = stats.gestures;
+}
+
+function clearGestureCards() {
+  document.querySelectorAll('.gesture-card').forEach(c => c.classList.remove('active'));
+}
+
+// ── Skeleton drawing ──────────────────────────────────────────────────────────
+const CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],         // thumb
+  [0,5],[5,6],[6,7],[7,8],         // index
+  [5,9],[9,10],[10,11],[11,12],    // middle
+  [9,13],[13,14],[14,15],[15,16],  // ring
+  [13,17],[17,18],[18,19],[19,20], // pinky
+  [0,17]                           // palm
+];
+
+function drawSkeleton(lm, conf) {
+  const W = handOvl.width, H = handOvl.height;
+  hCtx.save();
+
+  // Connections
+  hCtx.strokeStyle = `rgba(0,255,229,${0.5 + conf * 0.4})`;
+  hCtx.lineWidth = 1.5;
+  hCtx.shadowColor = '#00ffe5';
+  hCtx.shadowBlur = 6;
+
+  CONNECTIONS.forEach(([a, b]) => {
+    hCtx.beginPath();
+    hCtx.moveTo(lm[a].x * W, lm[a].y * H);
+    hCtx.lineTo(lm[b].x * W, lm[b].y * H);
+    hCtx.stroke();
+  });
+
+  // Landmark dots
+  lm.forEach((pt, i) => {
+    const isTip = [4,8,12,16,20].includes(i);
+    hCtx.beginPath();
+    hCtx.arc(pt.x * W, pt.y * H, isTip ? 5 : 3, 0, Math.PI * 2);
+    hCtx.fillStyle = isTip ? '#ff00cc' : '#00ffe5';
+    hCtx.shadowColor = isTip ? '#ff00cc' : '#00ffe5';
+    hCtx.shadowBlur = isTip ? 12 : 6;
+    hCtx.fill();
+  });
+
+  hCtx.restore();
+}
+
+// ── Finger UI ─────────────────────────────────────────────────────────────────
+function updateFingerUI(fingers) {
+  fingers.forEach((up, i) => {
+    document.getElementById(`fi-${i}`).classList.toggle('up', up);
+  });
+}
+
+// ── Flash ─────────────────────────────────────────────────────────────────────
+let flashTimer;
+function triggerFlash(text) {
+  gestFlashTxt.textContent = text;
+  gestFlash.classList.add('show');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => gestFlash.classList.remove('show'), 1200);
+}
+
+// ── Canvas utils ──────────────────────────────────────────────────────────────
+function clearCanvas() {
+  if (draw.undoStack.length > 20) draw.undoStack.shift();
+  draw.undoStack.push(dCtx.getImageData(0, 0, drawCvs.width, drawCvs.height));
+  dCtx.clearRect(0, 0, drawCvs.width, drawCvs.height);
+  redrawGrid();
+}
+
+function redrawGrid() {
+  if (!draw.showGrid) return;
+  dCtx.save();
+  dCtx.strokeStyle = 'rgba(0,255,229,0.06)';
+  dCtx.lineWidth = 1;
+  for (let x = 0; x < drawCvs.width; x += 40) {
+    dCtx.beginPath(); dCtx.moveTo(x,0); dCtx.lineTo(x, drawCvs.height); dCtx.stroke();
+  }
+  for (let y = 0; y < drawCvs.height; y += 40) {
+    dCtx.beginPath(); dCtx.moveTo(0,y); dCtx.lineTo(drawCvs.width, y); dCtx.stroke();
+  }
+  dCtx.restore();
+}
+
+function saveCanvas() {
+  const ts = document.createElement('canvas');
+  ts.width = drawCvs.width; ts.height = drawCvs.height;
+  const tCtx = ts.getContext('2d');
+  tCtx.fillStyle = '#04040c';
+  tCtx.fillRect(0,0,ts.width,ts.height);
+  tCtx.drawImage(drawCvs, 0, 0);
+  tCtx.font = '11px "Rajdhani",monospace';
+  tCtx.fillStyle = 'rgba(0,255,229,0.4)';
+  tCtx.fillText(`HANDWAVE · ${new Date().toLocaleString()}`, 8, ts.height - 8);
+  ts.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `handwave_${Date.now()}.png`;
+    a.click();
+  });
+}
+
+function updateColorSwatches() {
+  document.querySelectorAll('.color-swatch').forEach((sw, i) => {
+    sw.classList.toggle('active', DRAW_COLORS[i] === draw.color);
+  });
+}
+
+// ── UI events ─────────────────────────────────────────────────────────────────
+document.getElementById('color-row').addEventListener('click', e => {
+  const sw = e.target.closest('.color-swatch');
+  if (!sw) return;
+  draw.color = sw.dataset.color;
+  colorIdx = DRAW_COLORS.indexOf(draw.color);
+  updateColorSwatches();
+});
+
+document.getElementById('brush-size').addEventListener('input', function() {
+  draw.size = +this.value;
+  document.getElementById('brush-val').textContent = this.value;
+});
+
+document.getElementById('brush-opacity').addEventListener('input', function() {
+  draw.opacity = +this.value / 100;
+  document.getElementById('opacity-val').textContent = this.value;
+});
+
+document.getElementById('btn-clear').addEventListener('click', clearCanvas);
+document.getElementById('btn-save').addEventListener('click', () => { saveCanvas(); triggerFlash('💾 SAVED!'); });
+
+document.getElementById('btn-undo').addEventListener('click', () => {
+  if (draw.undoStack.length === 0) return;
+  const prev = draw.undoStack.pop();
+  dCtx.clearRect(0, 0, drawCvs.width, drawCvs.height);
+  dCtx.putImageData(prev, 0, 0);
+  triggerFlash('↩ UNDO');
+});
+
+document.getElementById('btn-grid').addEventListener('click', function() {
+  draw.showGrid = !draw.showGrid;
+  this.style.color = draw.showGrid ? 'var(--neon-c)' : '';
+  this.style.borderColor = draw.showGrid ? 'var(--neon-c)' : '';
+  dCtx.clearRect(0,0,drawCvs.width,drawCvs.height);
+  redrawGrid();
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+window.addEventListener('load', async () => {
+  try {
+    await startCamera();
+  } catch(err) {
+    document.getElementById('loading').innerHTML = `
+      <div style="font-family:'Exo 2',sans-serif;font-size:1.5rem;font-weight:700;letter-spacing:0.3em;color:#ff00cc">ERROR</div>
+      <div style="font-family:'Rajdhani',sans-serif;font-size:0.7rem;letter-spacing:0.15em;color:#3a3a70;margin-top:0.5rem">${err.message}</div>
+      <div style="font-family:'Rajdhani',sans-serif;font-size:0.6rem;letter-spacing:0.1em;color:#3a3a70;margin-top:0.4rem">ALLOW CAMERA ACCESS AND RELOAD</div>`;
+  }
+});
+</script>
+</body>
+</html>
